@@ -1,0 +1,163 @@
+\documentclass{beamer}
+\usetheme{Copenhagen}
+%\usecolortheme{beetle}
+%\usecolortheme{seahorse}
+%\usecolortheme{rose}
+\usecolortheme[snowy]{owl}
+\usetheme{default}
+
+% Title page details
+\title{Userspace control of memory mappings to support live update}
+\subtitle{Or: RFC for making dynamic virtual machine guest memory and state survive kexec}
+\author[James Gowans \& David Woodhouse (EC2) ]{James Gowans (\texttt{jgowans@amazon.com}) \\ \and David Woodhouse (\texttt{dwmw2@infradead.org})}
+\institute{Amazon / AWS / EC2}
+\date{LSF/MM/BPF summit, May 2022}
+
+\begin{document}
+
+\begin{frame}
+% Print the title page as the first slide
+\titlepage
+\end{frame}
+
+
+\begin{frame}{Agenda}
+  \tableofcontents[hideallsubsections]
+\end{frame}
+
+% Current section
+%\AtBeginSection[ ]
+%{
+%\begin{frame}{Outline}
+%    \tableofcontents[currentsection]
+%\end{frame}
+%}
+
+\section{Problem and Requirements}
+
+\begin{frame}{Problem}
+  \begin{itemize}
+    \item Live update of hypervisor via kexec: serialise \texttt{->} kexec \texttt{->} deserialise \texttt{->} run
+    \item Persist guest memory and state across live update (kexec).
+      \begin{enumerate}
+        \item Implies not kernel managed?
+      \end{enumerate}
+    \item Support memory overcommit: dynamic allocation/reclaim incl swap faults
+    \item Support side-car VM: carve out portion of memory to read-only
+    \item Deliver faults to userspace for post-copy LM.
+    \item Pass through slice of PCI BAR
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Requirements}
+  \begin{enumerate}
+    \item Guest memory and state should not touched by new kernel on kexec: \texttt{mem=}
+    \item \includegraphics[width=0.5\textwidth]{memmac-memory}
+    \item Play nicely with something like userfaultfd; only anonymous mem currently.
+    \item Slice up PCI BARs.
+    \item Privileged control process able to do Mandatory access control (MAC).
+    \item No struct page required!
+    \item VMM process considered untrusted
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Further Requirements}{Not trying to solve now, but good to keep in mind}
+  \begin{enumerate}
+    \item Remap IOMMU in sync with userspace
+    \item Keep DMA running during live update: IOMMU persistent page tables
+    \item Faster kexec: pass state between old and new kernel
+  \end{enumerate}
+  \break
+  Questions on problem/requirements?
+\end{frame}
+
+\section{Implementation Options}
+
+  \subsection{Fully fledged file system}
+  \begin{frame}{Fully fledged file system}
+    \begin{itemize}
+      \item Kernel fully responsible for allocations
+      \item Kernel reconstructs everything after kexec
+      \item Mount on same DAX device or supply cmdline param
+      \item Is this ``just'' PKRAM on top of DAX?
+      \item Unclear how to do PCI BARs
+      \item (Ab)use/extend \texttt{fadvise} to support MAC?
+    \end{itemize}
+  \end{frame}
+
+  \subsection{FUSE-style file system}
+  \begin{frame}{FUSE-style file system}
+    \begin{itemize}
+      \item Like FUSE, but ``control'' not data path.
+      \item Userspace needs to persist mappings across kexec
+      \item Userspace control process instantiates with underlying mem device
+      \item Control process gets fs ``faults,'' does allocations
+      \item Control can unmap for swap/reclaim
+      \item Control process can map to PCI BAR. Array of underlying mem sources?
+      \item Maybe persist allocation in fs?
+    \end{itemize}
+  \end{frame}
+
+  \subsection{Raw memory device}
+    \begin{frame}{Raw memory device}
+      \begin{itemize}
+        \item Char device with client and control fd. \texttt{/dev/mem} or \texttt{memfd} style.
+        \item Control initialised with underlying \texttt{/dev/mem} or DAX or BAR
+        \item Control fd can create/revoke page mappings to underlying via ioctls
+        \item Extend \texttt{memfd}?
+        \item Userspace needs to persist mappings across kexec
+        \item Similar to FUSE-style fs: fds not files
+        \item We have this running
+      \end{itemize}
+    \end{frame}
+
+\section{Comparison}
+\begin{frame}{Comparison}
+  \begin{itemize}
+    \item Fully fledged file system:
+      \begin{itemize}
+        \item Pros: optimal latency, filesystem introspectability and schematics, immediately available after kexec.
+        \item Cons: unclear how to do MAC, post-copy or swap faults, PCI BARS, IOMMU page tables
+      \end{itemize}
+    \item FUSE-style file system:
+      \begin{itemize}
+        \item Pros: Path to PCI BARs and post-copy/swap faults
+        \item Cons: Still difficult to shoe-horm control/MAC to file system interfaces?
+      \end{itemize}
+    \item Raw memory device:
+      \begin{itemize}
+        \item Pros: most flexible memory management: BARS, faults, page tables, etc.
+        \item Cons: Re-construct everything after kexec, passing fds around, no introspectability.
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\section{Next steps}
+
+\begin{frame}{Next steps}
+  \begin{enumerate}
+    \item VFIO IOMMU remapping needs a story...
+    \item Refine/decide on approach
+    \item Straw man for preferred: FUSE-style file system supporting PFN remapping
+    \item Find interested collaborators
+    \item RFC patch series based on what this preferred approach is
+    \item Update at KVM forum with polished patches
+  \end{enumerate}
+\end{frame}
+
+\section{Discussion and Questions}
+
+\begin{frame}{Discussion and Questions}
+  \begin{itemize}
+    \item Open floor for questions/comments.
+    \item Some ideas for feedback:
+      \begin{enumerate}
+        \item Are we re-inventing or overcomplicating this?
+        \item Other use-cases than live-update?
+        \item Other ideas to solve this which we should look at?
+        \item Which approach to go for?
+      \end{enumerate}
+  \end{itemize}
+\end{frame}
+
+\end{document}
