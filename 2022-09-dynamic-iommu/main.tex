@@ -1,4 +1,5 @@
 \documentclass{beamer}
+\usepackage{minted}
 \usetheme{Copenhagen}
 %\usecolortheme{beetle}
 %\usecolortheme{seahorse}
@@ -24,19 +25,129 @@
   \tableofcontents[hideallsubsections]
 \end{frame}
 
-% Current section
-%\AtBeginSection[ ]
-%{
-%\begin{frame}{Outline}
-%    \tableofcontents[currentsection]
-%\end{frame}
-%}
 
-\section{Hello world}
-
-\begin{frame}{Hello}
-  Hello
+\section{Problem and Requirements}
+\begin{frame}{Problem}
+  \begin{itemize}
+    \item VFIO mapping pins pages
+    \begin{itemize}
+      \item Populates IOMMU pgtable
+      \item Prevents memory overcommit
+    \end{itemize}
+    \item Simplicity: no need to touch IOMMU again
+    \item Correctness: no possibility of DMAR failure
+  \end{itemize}
 \end{frame}
 
+\section{Proposal: remap IOMMU via mmu\_notifier}
+\begin{frame}[fragile]
+  \frametitle{Hook into change\_pte notifier}
+  \begin{itemize}
+    \item \texttt{change\_pte} MMU notifier (\texttt{include/linux/mmu\_notifier.h})
+  \end{itemize}
+  \begin{minted}{c}
+/*
+ * change_pte is called in cases that pte mapping to page
+ * is changed: for example, when ksm remaps pte to point
+ * to a new shared page.
+ */
+void (*change_pte)(struct mmu_notifier *subscription,
+		   struct mm_struct *mm,
+		   unsigned long address,
+		   pte_t pte);
+  \end{minted}
+  \begin{itemize}
+    \item Not extensively used
+    \item Challenge: MUST always notify!
+    \begin{itemize}
+      \item Don't want to interfere with KVM
+    \end{itemize}
+  \end{itemize}
+\end{frame}
 
+\begin{frame}[fragile]
+  \frametitle{Introduce IOMMU remap\_pte callback}
+  \begin{minted}{c}
+struct iommu_domain_ops {
+...
+      int (*remap_pte)(struct iommu_domain *domain,
+			dma_addr_t const iova,
+			phys_addr_t const pfn,
+			size_t const size);
+}
+  \end{minted}
+  \begin{itemize}
+    \item Challenge: size changes (THP coalesce)
+    \begin{itemize}
+      \item Suggest: not supported
+      \item Can still use hugetlbfs
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Pause for questions...}
+  Next: make DMA robust with guest cooperation
+
+  Pause for questions/comments
+  \begin{itemize}
+    \item \texttt{change\_pte} notifier?
+    \item Size changes a real problem?
+    \item Other challenges?
+  \end{itemize}
+\end{frame}
+
+\section{Guest cooperation: page pinning device driver}
+\begin{frame}[fragile]
+  \frametitle{Guest cooperation: page pinning device driver}
+  \begin{itemize}
+    \item Problem: DMA to no-resident page
+    \item Solution: hook into \texttt{dma\_map\_*}
+    \item Register hook with dma mapping (inspired by FPR):
+  \end{itemize}
+  \begin{minted}{c}
+int dma_pinning_register(struct dma_pinning_dev *dpdev);
+  \end{minted}
+  \begin{itemize}
+    \item Lazy alloc: access page to ensure resident
+    \item Swap: share bitmap with hypervisor
+    \begin{itemize}
+      \item Set bit when mapped for DMA: not swappable
+      \item Clear bit when unmapped: swappable
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{Driver integration}
+  \begin{itemize}
+    \item Expose as IOMMU?
+      \begin{itemize}
+        \item: No: no DMAR, no IRQ remapping
+      \end{itemize}
+    \item Piggyback on existing device? (virtio something?)
+    \item Register on \texttt{struct device} device DMA ops?
+      \begin{minted}{c}
+           const struct dma_map_ops *dma_ops;
+      \end{minted}
+    \item Hook into DMA direct?
+      \begin{minted}{c}
+void *dma_direct_alloc(struct device *dev, size_t size,
+                dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
+        ...
+        dma_pinning_pin(pfn, size, ...);
+      \end{minted}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Device discovery}
+  \begin{itemize}
+    \item Must be probed early: before any DMA
+    \item Virtio? (early enough?)
+    \item ACPI table entry?
+      \begin{itemize}
+        \item Or device tree?
+      \end{itemize}
+    \item Guidance needed!
+  \end{itemize}
+\end{frame}
 \end{document}
