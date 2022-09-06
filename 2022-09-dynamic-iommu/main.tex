@@ -1,11 +1,12 @@
 \documentclass{beamer}
 \usepackage{minted}
+\usepackage{hyperref}
 \usetheme{Copenhagen}
 %\usecolortheme{beetle}
 %\usecolortheme{seahorse}
 %\usecolortheme{rose}
 \usecolortheme[snowy]{owl}
-\usetheme{default}
+%\usetheme{default}
 
 \title{Cooperative DMA in a memory oversubscribed environment}
 \subtitle{Being able to run memory oversubscribed virtual machines with PCI passthrough via VFIO.}
@@ -26,47 +27,42 @@
 \end{frame}
 
 
-\section{Problem and Requirements}
-\begin{frame}{Problem}
+\section{Background: device passthrough and memory overcommit}
+\begin{frame}{Background, problem \& requirements}
+  \texttt{VFIO\_IOMMU\_MAP\_DMA} pins all pages, populating IOMMU pgtables:
   \begin{itemize}
-    \item VFIO mapping pins pages
-    \begin{itemize}
-      \item Populates IOMMU pgtable
-      \item Prevents memory overcommit
-    \end{itemize}
     \item Simplicity: no need to touch IOMMU again
     \item Correctness: no possibility of DMAR failure
+    \item Prevents memory overcommit. :-(
   \end{itemize}
+  Prior art:
+  \begin{itemize}
+    \item ATS + PRI for faults. Not plumbed into VFIO? Unsure how prevelant PRI is? Support on root port for arbitrary PCI or only Intel graphics? May take a while to get generally correct.
+    \item SVA/SVM for pgtable sharing; does it work for all hardware? May not always want IOMMU and userspace strictly in sync, unless PRI/ATS in use).
+  \end{itemize}
+  \textbf{Looking for solution for devices which *can't* take PFs: No PRI/ATS/SVM.}
+  Suggest software solution.
 \end{frame}
 
-\section{Proposal: remap IOMMU via mmu\_notifier}
+\section{IOMMU pgtable reremaping via mmu\_notifier}
 \begin{frame}[fragile]
-  \frametitle{Hook into change\_pte notifier}
+  \frametitle{Hook VFIO into MMU notifiers}
+  Use case of keeping IOMMU in sync with userspace. Alternative to SVA/SVM.
+
+  Hook into mmu notifiers:
   \begin{itemize}
-    \item \texttt{change\_pte} MMU notifier (\texttt{include/linux/mmu\_notifier.h})
+    \item \texttt{change\_pte} when a userspace pgtable entry is (re)mapped.
+    \item \texttt{invalidate\_range\_(start|end)} when entry is zapped.
   \end{itemize}
-  \begin{minted}{c}
-/*
- * change_pte is called in cases that pte mapping to page
- * is changed: for example, when ksm remaps pte to point
- * to a new shared page.
- */
-void (*change_pte)(struct mmu_notifier *subscription,
-		   struct mm_struct *mm,
-		   unsigned long address,
-		   pte_t pte);
-  \end{minted}
-  \begin{itemize}
-    \item Not extensively used
-    \item Challenge: MUST always notify!
-    \begin{itemize}
-      \item Don't want to interfere with KVM
-    \end{itemize}
-  \end{itemize}
+
+  Challenge: \texttt{change\_pte} not extensively used. Currently only CoW? For IOMMU we *MUST* always notify. Need to increase coverage to when new page is populated (lazy alloc).\\
+  
+  One user is KVM; additional uses may interfere...
 \end{frame}
 
 \begin{frame}[fragile]
   \frametitle{Introduce IOMMU remap\_pte callback}
+  VFIO would invoke new IOMMU callback:
   \begin{minted}{c}
 struct iommu_domain_ops {
 ...
@@ -76,22 +72,20 @@ struct iommu_domain_ops {
 			size_t const size);
 }
   \end{minted}
-  \begin{itemize}
-    \item Challenge: size changes (THP coalesce)
-    \begin{itemize}
-      \item Suggest: not supported
-      \item Can still use hugetlbfs
-    \end{itemize}
-  \end{itemize}
+  That would walk page table and replace (or zap) entry.
+
+  Challenge: PTE size changes (eg: THP coalesce) may be tricky to handle. Hugetlbfs would still work; fixed huge size.
 \end{frame}
 
 \begin{frame}{Pause for questions...}
   Next: make DMA robust with guest cooperation
 
-  Pause for questions/comments
+  Pause for questions/comments. Eg:
   \begin{itemize}
-    \item \texttt{change\_pte} notifier?
-    \item Size changes a real problem?
+    \item Compare this against Shared Virtual Address/Memory?
+    \item Is hooking into \texttt{change\_pte} notifier sane?
+    \item Is PTE size change (THP) a real problem?
+    \item Would HMM be applicable here? (I don't think it's the right use case)
     \item Other challenges?
   \end{itemize}
 \end{frame}
@@ -99,40 +93,30 @@ struct iommu_domain_ops {
 \section{Guest cooperation: page pinning device driver}
 \begin{frame}[fragile]
   \frametitle{Guest cooperation: page pinning device driver}
+  Problem: guest initiate DMA to non-resident page causing DMAR failure.
+  Prior art:
   \begin{itemize}
-    \item Problem: DMA to no-resident page
-    \item Solution: hook into \texttt{dma\_map\_*}
-    \item Register hook with dma mapping (inspired by FPR):
+    \item ATS + PRI, but not that prevalent.
+    \item Expose vIOMMU. Expensive due to VM exits on remapping, lot of invalidation and shadow pgtables.
   \end{itemize}
-  \begin{minted}{c}
-int dma_pinning_register(struct dma_pinning_dev *dpdev);
-  \end{minted}
-  \begin{itemize}
-    \item Lazy alloc: access page to ensure resident
-    \item Swap: share bitmap with hypervisor
-    \begin{itemize}
-      \item Set bit when mapped for DMA: not swappable
-      \item Clear bit when unmapped: swappable
-    \end{itemize}
-  \end{itemize}
+   Light weight solution: guest kernel access page before DMA to ensure resident. Much lower cost; typically no VM exit.\\
+
+  Just an access is good enough for lazy alloc, a shared ``pinned'' bitmap can allow swap too.
 \end{frame}
 
 \begin{frame}[fragile]
   \frametitle{Driver integration}
+  Where should ``page touching'' functionality hook in?
   \begin{itemize}
-    \item Expose as IOMMU?
-      \begin{itemize}
-        \item: No: no DMAR, no IRQ remapping
-      \end{itemize}
-    \item Piggyback on existing device? (virtio something?)
-    \item Register on \texttt{struct device} device DMA ops?
+    \item Expose as IOMMU? No: no DMAR, no IRQ remapping
+    \item Register on \texttt{struct device} device DMA ops? This:
       \begin{minted}{c}
            const struct dma_map_ops *dma_ops;
       \end{minted}
-    \item Hook into DMA direct?
+    \item Hook into \texttt{dma\_direct\_map\_page} (and friends)? Eg:\\
       \begin{minted}{c}
 void *dma_direct_alloc(struct device *dev, size_t size,
-                dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
+                dma_addr_t *dma_handle, gfp_t gfp, ...)
         ...
         dma_pinning_pin(pfn, size, ...);
       \end{minted}
@@ -140,14 +124,35 @@ void *dma_direct_alloc(struct device *dev, size_t size,
 \end{frame}
 
 \begin{frame}{Device discovery}
+  How should the host expose the device?
+  Just a few MMIO registers... Discovery and handshake.\\
+  
+  Must be probed early: before any DMA.\\
   \begin{itemize}
-    \item Must be probed early: before any DMA
-    \item Virtio? (early enough?)
-    \item ACPI table entry?
+    \item Piggyback on existing device? (virtio something?)
+    \item New ACPI table entry? Where?
       \begin{itemize}
         \item Or device tree?
       \end{itemize}
-    \item Guidance needed!
   \end{itemize}
+  Guidance needed!
+\end{frame}
+
+\begin{frame}{Next steps}
+  Summary:
+  \begin{itemize}
+    \item ``Page pinning'' DMA hook (in place of PRI + ATS).
+    \item Dynamic page tables via mmu\_notifiers (in place of SVM)
+  \end{itemize}
+  Proof of concept; seems to work:
+  \begin{itemize}
+    \item Host: \href{https://github.com/jgowans/linux/tree/dynamic-vfio}{github:jgowans/linux/dynamic-vfio}
+    \item Guest: \href{https://github.com/jgowans/linux/tree/page-touching-dma-ops-v6}{github:jgowans/linux/page-touching-dma-ops-v6}
+  \end{itemize}
+  Need to figure out relation to IOMMUFD.\\
+ 
+  Send out RFC for dynamic VFIO via mmu\_notifiers.\\
+ 
+  Start discussion on exposing page pinning device model.
 \end{frame}
 \end{document}
