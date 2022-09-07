@@ -8,10 +8,10 @@
 
 % Title page details
 \title{muse: Memory management of persistent memory in userspace}
-\subtitle{Giving userspace control over dynamic virtual machine guest memory and state survive kexec}
+\subtitle{Giving userspace control over dynamic virtual machine guest memory to survive kexec}
 \author[James Gowans \& David Woodhouse (EC2) ]{James Gowans (\texttt{jgowans@amazon.com}) \\ \and David Woodhouse (\texttt{dwmw2@infradead.org})}
 \institute{Amazon / AWS / EC2}
-\date{LPC, September 2022}
+\date{LPC, MM MC, September 2022}
 
 \begin{document}
 
@@ -35,60 +35,63 @@
 
 \section{Background, Problem and Requirements}
 
-\begin{frame}{Background}
+\begin{frame}{Live update memory management}
+    Live update of hypervisor via kexec:
+
+    serialise \texttt{->} kexec \texttt{->} deserialise \texttt{->} run
+    
+    Persist guest memory and state across live update (kexec). Can't be ``normal'' kernel allocations.
   \begin{itemize}
-    \item Idea presented at LSF/MM earlier this year
-    \item Live update of hypervisor via kexec: serialise \texttt{->} kexec \texttt{->} deserialise \texttt{->} run
-    \item Persist guest memory and state across live update (kexec).
-      \begin{enumerate}
-        \item Implies not kernel managed?
-      \end{enumerate}
-    \item Support memory overcommit: dynamic allocation/reclaim incl swap faults
-    \item Support side-car VM: carve out portion of memory to read-only
+    \item Basic case: fixed allocation at launch.
+    \item Side-car VM: carve out portion of memory to read-only
+    \item Memory overcommit: dynamic allocation/reclaim incl swap
     \item Deliver faults to userspace for post-copy LM.
     \item Pass through slice of PCI BAR
+    \item Keep DMA running during kexec: IOMMU persistent pgtables
   \end{itemize}
+  Idea floated at LSF/MM earlier this year: https://lwn.net/Articles/895453/
+
+  Make live update properly supported!
 \end{frame}
 
-\begin{frame}{Requirements}
-  \begin{enumerate}
-    \item Guest memory and state should not touched by new kernel on kexec: \texttt{mem=}
-    \item \includegraphics[width=0.5\textwidth]{memmac-memory}
-    \item Play nicely with something like userfaultfd; only anonymous mem currently.
-    \item Slice up PCI BARs.
-    \item Privileged control process able to do Mandatory access control (MAC).
-    \item No struct page required!
-    \item VMM process considered untrusted
-  \end{enumerate}
+\begin{frame}{Proposal: Memory management in userspace}
+  Guest memory and state should not touched by new kernel on kexec: \texttt{mem=}
+  
+  \includegraphics[width=0.5\textwidth]{memmac-memory}
+
+  Control process: own persistent memory, program allocations into kernel.
+
+  Client process (VMM): use those allocation in non-privileged way.
+  \newline
+  Play nicely with something like userfaultfd; only anonymous mem currently.
 \end{frame}
 
-\begin{frame}{Further Requirements}{Not trying to solve now, but good to keep in mind}
-  \begin{enumerate}
-    \item Remap IOMMU in sync with userspace
-    \item Keep DMA running during live update: IOMMU persistent page tables
-    \item Faster kexec: pass state between old and new kernel
-  \end{enumerate}
-  \break
-  Questions on problem/requirements?
-\end{frame}
 
 \section{Implementation Options}
 
 \subsection{Options considered}
 \begin{frame}{Options considered}
-  \begin{enumerate}
-    \item Raw memory (/dev/mem style) file descriptors
-      \begin{enumerate}
-        \item Unpalatabley raw: no introspection
-      \end{enumerate}
-    \item Raw memory (/dev/mem style) file descriptors
-      \begin{enumerate}
-        \item Unpalatabley raw: no introspection
-      \end{enumerate}
-  \end{enumerate}
+  \begin{itemize}
+    \item Raw memory (/dev/mem style) file descriptors. Unpalatabley raw: no introspection.
+    \item Filesystem with userspace control.
+    \item Fullly kernel management persistence
+  \end{itemize}
 \end{frame}
 
+\section{Proposal: ``mmuse'' fs (mem mgmt in userspace)}
+\begin{frame}{Proposal: ``mmuse'' fs (mem mgmt in userspace)}
+  In-memory filesystem. Mappings controlled by userspace. Backed by non-kernel managed memory.\\
 
+  Similar to fuse (userspace control) but mappings not block data.
+
+  Control process usage:
+  \begin{itemize}
+    \item Carve out large chunk of host memory via \texttt{mem=} param.
+    \item Mount mmuse, setting backing file something with the carved out memory: \texttt{/dev/mem}, \texttt{DAX} device, etc.
+    \item Create files, initially empty containers
+    \item Assign/re-assign mappings via \texttt{ioctl}s.
+  \end{itemize}
+\end{frame}
 \section{Discussion and Questions}
 
 \begin{frame}{Discussion and Questions}
