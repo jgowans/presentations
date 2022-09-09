@@ -1,5 +1,6 @@
 \documentclass{beamer}
 \usetheme{Copenhagen}
+\usepackage{minted}
 %\usecolortheme{beetle}
 %\usecolortheme{seahorse}
 %\usecolortheme{rose}
@@ -69,12 +70,24 @@
 
 \section{Implementation Options}
 
-\subsection{Options considered}
+\subsection{Options considered: userspace vs kernel}
 \begin{frame}{Options considered}
+  \textbf{Filesystem with userspace control:} Filesystem backed by non-kernel managed memory.
+  Provide privileged userspace process the ability to control memory mappings (\texttt{pg\_offset} to \texttt{PFN}) of files.
+  Userspace takes and resolves faults. Updates mappings dynamically.\\
+  
+  \textbf{Fully kernel management persistence:} No control process: kernel allocator handles all faults.
+  Like pkram[1] RFC. How to expose 
+
+  [1] https://lwn.net/Articles/851192/
+  Think \texttt{tempfs} with persistence.
+\end{frame}
+
+\begin{frame}{Suggestion: filesystem with userspace control}
+  Justification:
   \begin{itemize}
-    \item Raw memory (/dev/mem style) file descriptors. Unpalatabley raw: no introspection.
-    \item Filesystem with userspace control.
-    \item Fullly kernel management persistence
+    \item Avoids attempting to expose allocation policies and things like swap to persistent memory.
+    \item Foo.
   \end{itemize}
 \end{frame}
 
@@ -93,6 +106,78 @@
   \end{itemize}
 \end{frame}
 \section{Discussion and Questions}
+
+\begin{frame}[fragile]
+  Example: Set up filesystem and backing memory. Mount:
+
+  \begin{minted}{c}
+    mount -t mmuse guest-memory /mnt/guest-memory
+  \end{minted}
+  \vspace{1cm}
+  Initially admin file for control process:
+  \begin{minted}{c}
+    ls -l /mnt/guest-memory/
+    -rw-rw---- 1 root root   0 Aug  4 00:00  admin
+  \end{minted}
+  \vspace{0.8cm}
+  Set backing to \texttt{/dev/mem}:
+  \begin{minted}{c}
+    int admin_fd = open("/mnt/guest-memory/admin")
+    int devmem_fd = open("/dev/mem")
+    ioctl(admin_fd, SET_BACKING_FD, devmem_fd)
+  \end{minted}
+\end{frame}
+
+\begin{frame}[fragile]
+  Example: Programming a mapping from backing memory to a file:
+  \begin{minted}{c}
+  dst_fd = open("/mnt/guest-memory/dom123_0_3GiB");
+  struct mmuse_mapping mapping = {
+    .dst = dst_fd,
+    .src_start = 100 * GiB,
+    .dst_start = 0,
+    .size = 3 * GiB,
+    .granulaity = GIGANTIC_PAGE // lvl 3 -> 1 GiB
+  };
+  ioctl(admin_fd, MAP_MEMORY_RANGE, &dst_fd);
+  \end{minted}
+
+  When client processes mmaps that file it would get backing memory, faulting in 1 GiB PTEs.
+
+  Control process would replay after live update.
+\end{frame}
+
+\begin{frame}[fragile]
+  Example: heirarchy using one mmuse file as backing memory for another:\\
+
+  \begin{minted}{c}
+  int source_fd = open("/mnt/guest_memory/dom:123_memory")
+
+  mount -t mmuse dom:123_memory /mnt/dom:123_memory
+  int admin_fd = open("/mnt/dom:123_memory/admin")
+
+  ioctl(admin_fd, SET_BACKING_FD, source_fd)
+  \end{minted}
+  \vspace{0.7cm}
+  Use case: hand over large chunk of memory to guest VMM. That VMM can carve it up for sidecar VMs.
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{Example: memory overcommit}
+  Memory overcommit: reclaim a chunk of memory currently assigned to a file:
+
+  \begin{minted}{c}
+  struct mappings = {
+    .dst = dst_fd,
+    .src_start = (100 << 30),
+    .dst_start = 0,
+    .size = (16 << 20)
+  }
+  ioctl(admin_fd, UNMAP_MEMORY_RANGE, &dst_fd);}
+  \end{minted}
+  \vspace{0.7cm}
+  Use case: hand over large chunk of memory to guest VMM. That VMM can carve it up for sidecar VMs.
+\end{frame}
 
 \begin{frame}{Discussion and Questions}
   \begin{itemize}
