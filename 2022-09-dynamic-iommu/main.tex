@@ -103,7 +103,7 @@ struct iommu_domain_ops {
   \end{itemize}
    Light weight solution: guest kernel access page before DMA to ensure resident. Much lower cost; typically no VM exit.\\
 
-  Just an access is good enough for lazy alloc, a shared ``pinned'' bitmap can allow swap too.
+  Just an access is good enough for lazy alloc, a shared ``pinned'' bitmap can allow swap too. Carefully sequenced to avoid races.
 \end{frame}
 
 \begin{frame}[fragile]
