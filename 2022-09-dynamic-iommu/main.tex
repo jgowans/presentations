@@ -38,7 +38,7 @@
   Prior art:
   \begin{itemize}
     \item ATS + PRI for faults. Not plumbed into VFIO? Unsure how prevelant PRI is? Support on root port for arbitrary PCI or only Intel graphics? May take a while to get generally correct.
-    \item SVA/SVM for pgtable sharing; does it work for all hardware? May not always want IOMMU and userspace strictly in sync, unless PRI/ATS in use).
+    \item SVA/SVM for pgtable sharing; does it work for all hardware? May not always want IOMMU and userspace strictly in sync, unless PRI/ATS in use.
   \end{itemize}
   \textbf{Looking for solution for devices which *can't* take PFs: No PRI/ATS/SVM.}
   Suggest software solution.
@@ -47,7 +47,9 @@
 \section{IOMMU pgtable reremaping via mmu\_notifier}
 \begin{frame}[fragile]
   \frametitle{Hook VFIO into MMU notifiers}
-  Use case of keeping IOMMU in sync with userspace. Alternative to SVA/SVM.
+  Use case of keeping IOMMU in sync with userspace. Alternative to SVA/SVM.\\
+  
+  New ioctl: \texttt{VFIO\_IOMMU\_MAP\_DMA\_*UNPINNED*}: no allocation or IOMMU pgtable population.\\
 
   Hook into mmu notifiers:
   \begin{itemize}
