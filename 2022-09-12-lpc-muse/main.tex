@@ -8,7 +8,7 @@
 \usetheme{default}
 
 % Title page details
-\title{muse: Memory management of persistent memory in userspace}
+\title{mmuse: Memory management of persistent memory in userspace}
 \subtitle{Giving userspace control over dynamic virtual machine guest memory to survive kexec}
 \author[James Gowans \& David Woodhouse (EC2) ]{James Gowans (\texttt{jgowans@amazon.com}) \\ \and David Woodhouse (\texttt{dwmw2@infradead.org})}
 \institute{Amazon / AWS / EC2}
@@ -36,76 +36,65 @@
 
 \section{Background, Problem and Requirements}
 
-\begin{frame}{Live update memory management}
-    Live update of hypervisor via kexec:
+\begin{frame}{Live update}
+  Live update of hypervisor via kexec:
 
-    serialise \texttt{->} kexec \texttt{->} deserialise \texttt{->} run
+  serialise \texttt{->} kexec \texttt{->} deserialise \texttt{->} run\\
     
-    Persist guest memory and state across live update (kexec). Can't be ``normal'' kernel allocations.
+  Persist guest memory and state across live update (kexec).\\
+
+  Different to snapshot/restore: full restart of userspace process; new VMM binary! Only preserve guest.\\
+
+  Objective: Make live update properly supported! Starting with memory.
+\end{frame}
+
+\begin{frame}{Live update memory management}
+  Memory ``use cases:''
   \begin{itemize}
     \item Basic case: fixed allocation at launch.
-    \item Side-car VM: carve out portion of memory to read-only
     \item Memory overcommit: dynamic allocation/reclaim incl swap
     \item Deliver faults to userspace for post-copy LM.
-    \item Pass through slice of PCI BAR
     \item Keep DMA running during kexec: IOMMU persistent pgtables
+    \item Pass through slice of PCI BAR
+    \item Side-car VM: carve out portion of memory to run another VM.
   \end{itemize}
-  Idea floated at LSF/MM earlier this year: https://lwn.net/Articles/895453/
-
-  Make live update properly supported!
 \end{frame}
-
-\begin{frame}{Proposal: Memory management in userspace}
-  Guest memory and state should not touched by new kernel on kexec: \texttt{mem=}
-  
-  \includegraphics[width=0.5\textwidth]{memmac-memory}
-
-  Control process: own persistent memory, program allocations into kernel.
-
-  Client process (VMM): use those allocation in non-privileged way.
-  \newline
-  Play nicely with something like userfaultfd; only anonymous mem currently.
-\end{frame}
-
 
 \section{Implementation Options}
-
 \subsection{Options considered: userspace vs kernel}
 \begin{frame}{Options considered}
-  \textbf{Filesystem with userspace control:} Filesystem backed by non-kernel managed memory.
-  Provide privileged userspace process the ability to control memory mappings (\texttt{pg\_offset} to \texttt{PFN}) of files.
-  Userspace takes and resolves faults. Updates mappings dynamically.\\
+  \textbf{Fully kernel management persistence:} Traditional kernel-driven allocations.
+  Kernel state passed from old to new kernel. 
+  Like pkram\footnote{https://lwn.net/Articles/851192/} RFC; think \texttt{tempfs} with persistence.\\
+  State can be passed similar to Xen breadcrumbs.\\
+  Pros: fast, Cons: complex state hand over.\\
   
-  \textbf{Fully kernel management persistence:} No control process: kernel allocator handles all faults.
-  Like pkram[1] RFC. How to expose 
-
-  [1] https://lwn.net/Articles/851192/
-  Think \texttt{tempfs} with persistence.
+  \textbf{Filesystem with userspace control:} Filesystem backed by non-kernel managed memory: hard split of persistent vs ephemeral.
+  Provide privileged userspace process the ability to control memory mappings (\texttt{pg\_offset} to \texttt{PFN}) of files.\\
+  Store arbitrary file types: memory, state, pgtables, etc.
 \end{frame}
 
 \begin{frame}{Suggestion: filesystem with userspace control}
-  Justification:
+  Idea floated at LSF/MM earlier this year: https://lwn.net/Articles/895453/\\
+
+  Suggesting userspace filesystem. Justification:
   \begin{itemize}
-    \item Avoids attempting to expose allocation policies and things like swap to persistent memory.
-    \item Foo.
+    \item Avoid complexity of passing and re-hydrating state.
+    \item Avoid attempting to expose allocation policies and things like swap to persistent memory.
+    \item Allow userspace policy and implementation to develop freely.
   \end{itemize}
 \end{frame}
 
 \section{Proposal: ``mmuse'' fs (mem mgmt in userspace)}
 \begin{frame}{Proposal: ``mmuse'' fs (mem mgmt in userspace)}
-  In-memory filesystem. Mappings controlled by userspace. Backed by non-kernel managed memory.\\
-
-  Similar to fuse (userspace control) but mappings not block data.
-
-  Control process usage:
   \begin{itemize}
-    \item Carve out large chunk of host memory via \texttt{mem=} param.
-    \item Mount mmuse, setting backing file something with the carved out memory: \texttt{/dev/mem}, \texttt{DAX} device, etc.
-    \item Create files, initially empty containers
-    \item Assign/re-assign mappings via \texttt{ioctl}s.
+    \item Carve out persistent memory by \texttt{mem=} cmdline param:
+    \includegraphics[width=0.5\textwidth]{memmac-memory}
+  \item Mount \texttt{mmuse}, setting backing file to something with access to the carved out memory: \texttt{/dev/mem}, \texttt{DAX} device, etc.
+    \item Control process: own persistent memory, create files, program allocations into kernel via file ioctls.
+    \item Client process (QEMU): use those allocation in non-privileged way: just open the file.
   \end{itemize}
 \end{frame}
-\section{Discussion and Questions}
 
 \begin{frame}[fragile]
   Example: Set up filesystem and backing memory. Mount:
@@ -135,8 +124,8 @@
   struct mmuse_mapping mapping = {
     .dst = dst_fd,
     .src_start = 100 * GiB,
-    .dst_start = 0,
     .size = 3 * GiB,
+    .dst_start = 0,
     .granulaity = GIGANTIC_PAGE // lvl 3 -> 1 GiB
   };
   ioctl(admin_fd, MAP_MEMORY_RANGE, &dst_fd);
@@ -145,6 +134,38 @@
   When client processes mmaps that file it would get backing memory, faulting in 1 GiB PTEs.
 
   Control process would replay after live update.
+\end{frame}
+
+\begin{frame}{To persist or not to persist?}
+  Should the filesystem preserve state internally across kexec: files, mappings, etc.
+  Or should userspace re-drive filesystem state?
+
+  Userspace need to know state anyway, so ought to be able to re-drive.\\
+
+  Advantage of persisting: 1) faster restore on LU, 2) kernel can consume files early.\\
+
+  Advantage of not persisting: No need for memory for pmem for metadata. Generally simpler.\\
+
+  Suggest: no persist at first, retrofit when more stable.
+\end{frame}
+
+\begin{frame}{Discussion and Questions}
+  Work so far:\\
+  Fairly complete proof of concept implemented. Not LKML worthy yet, but could be!\\
+
+  Open floor for questions/comments.\\
+
+  Some ideas for feedback:
+  \begin{itemize}
+    \item Are we re-inventing or overcomplicating this?
+    \item Other use-cases than live-update?
+    \item Other ideas to solve this which we should look at?
+    \item Should we add \texttt{mmuse} to linux?
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Backup slides}
+  Backup slides.
 \end{frame}
 
 \begin{frame}[fragile]
@@ -179,17 +200,5 @@
   Use case: hand over large chunk of memory to guest VMM. That VMM can carve it up for sidecar VMs.
 \end{frame}
 
-\begin{frame}{Discussion and Questions}
-  \begin{itemize}
-    \item Open floor for questions/comments.
-    \item Some ideas for feedback:
-      \begin{enumerate}
-        \item Are we re-inventing or overcomplicating this?
-        \item Other use-cases than live-update?
-        \item Other ideas to solve this which we should look at?
-        \item Which approach to go for?
-      \end{enumerate}
-  \end{itemize}
-\end{frame}
 
 \end{document}
